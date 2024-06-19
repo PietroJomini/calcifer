@@ -2,6 +2,7 @@
 #define SLIB
 
 #include <stdint.h>
+#include <string.h>   // memcpy
 #include <strings.h>  // ffs
 
 #define MASK_HOUSE 0b111111111
@@ -58,10 +59,15 @@ int naked_single(grid_t *const g);
 // returns the amount of hidden singles collapsed
 int hidden_single(grid_t *const g);
 
-// apply solving techniques until solved (or failed to)
+// apply solving techniques until solved
 // implemented st:
 //   - [x] naked singles
-void solve(grid_t *const g);
+//   - [x] hidden singles
+// if other implemented techniques don't hit and the puzzle is still unsolved,
+// resolve to bruteforce via ariadne's thread technique.
+// returns the amount of guesses
+int solve(grid_t *const g);
+int _solve_r(grid_t *const g);
 
 // check if a position has conflicting values
 // a position is solved if this is true and all cell are collapsed
@@ -197,8 +203,8 @@ int hidden_single(grid_t *const g) {
             }
 
             // check box
-            m = ~g->dm[v] >> (27 * (i / 3) + i % 3 * 3);     // shift box to index 0
-            house = m & 0b111 | (m & 0b111000000000) >> 6 |  // flat box 0 to row 0
+            m = ~g->dm[v] >> (27 * (i / 3) + i % 3 * 3);       // shift box to index 0
+            house = (m & 0b111) | (m & 0b111000000000) >> 6 |  // flat box 0 to row 0
                     (m & 0b111000000000000000000) >> 12;
             if (__builtin_popcount(house) == 1) {
                 // printf("box %d | %d %d\n", i, v + 1, boxi[i][ffs(house) - 1]);
@@ -211,9 +217,9 @@ int hidden_single(grid_t *const g) {
     return k;
 }
 
-void solve(grid_t *const g) {
+int _solve_r(grid_t *const g) {
+    // apply standard sts until no more progress is being made
     int collapsed = 0, ns, hs;
-
     do {
         // printf("\n");
         collapsed = 0;
@@ -224,7 +230,37 @@ void solve(grid_t *const g) {
         // printf("ns: %d\nhs: %d\n", ns, hs);
         collapsed += ns + hs;
     } while (collapsed != 0);
+
+    // heuristically get next cell
+    // - smallest number of candidates (should reduce branching factor)
+    int i = -1, v, mv = 10, n;
+    for (int c = 0; c < 81; c++)
+        if (!(g->flags[c] & FLAG_COLLAPSED) &&
+            (n = __builtin_popcount(g->cells[c]) < mv)) {
+            mv = v;
+            i = c;
+        }
+
+    // no more cells with candidates, should exit
+    if (i == -1) return 1;
+
+    // bruteforce
+    grid_t g2;
+    for (int v = 0; v < 9; v++)
+        if (g->cells[i] & 1 << v) {
+            memcpy(&g2, g, sizeof(grid_t));
+            collapse(&g2, i, v);
+            int k = _solve_r(&g2);
+            if (k) {
+                memcpy(g, &g2, sizeof(grid_t));
+                return k + 1;
+            }
+        }
+
+    return 0;
 }
+
+int solve(grid_t *const g) { return _solve_r(g) - 1; }
 
 int check(grid_t *const g) {
     // digits store per house
