@@ -31,6 +31,11 @@ typedef struct grid {
     //   1: collapsed
     //   2: given
     uint8_t flags[81];
+
+    // digit maps
+    //  `dm[digit] & cell == 1` if `digit` can't be on `cell`
+    // mirror of `collapsed` divided by digit as a bitmask
+    __int128_t dm[9];
 } grid_t;
 
 // create an empty grid
@@ -57,6 +62,13 @@ int hidden_single(grid_t *const g);
 // implemented st:
 //   - [x] naked singles
 void solve(grid_t *const g);
+
+// check if a position has conflicting values
+// a position is solved if this is true and all cell are collapsed
+// this should just be a sanity check, as if a rule collapse succesfully and without
+// miscalculation this should be trivial.
+// return 0 on success, the index of the first conflicting cell on failure
+int check(grid_t *const g);
 
 #endif  // SLIB
 
@@ -96,10 +108,7 @@ const uint8_t boxi[9][9] = {
     {60, 61, 62, 69, 70, 71, 78, 79, 80},
 };
 
-grid_t new() {
-    // i think this uses a gcc extension ([0 ... 80])
-    return (grid_t){{0}, {[0 ... 80] = MASK_HOUSE}};
-};
+grid_t new() { return (grid_t){{0}, {[0 ... 80] = MASK_HOUSE}, {0}, {0}}; };
 
 grid_t load(const char src[81]) {
     grid_t g = new ();
@@ -117,15 +126,32 @@ void collapse(grid_t *const g, const int cell, const int value) {
     g->collapsed[cell] = value;
     g->flags[cell] |= FLAG_COLLAPSED;
 
-    // i could check into xor, but this is probably faster (and non-branching)
-    int mask = MASK_HOUSE ^ 1 << value;
+    // clear dm on this cell (no digit can be a candidate on a collapsed cell)
+    // i could also make the flag array into two __int128_t masks and when i check a dm
+    // combine it with the collapsed mask: ~(collapsed_mask & dm[v])
+    __int128_t vmask = (__int128_t)1 << cell;
+    for (int v = 0; v < 9; v++) g->dm[v] |= vmask;
 
-    // collapse affected houses
+    int mask = mask = MASK_HOUSE ^ 1 << value;
     int row = hcord[cell][0] * 9, col = hcord[cell][1], box = hcord[cell][2];
     for (int i = 0; i < 9; i++, row++, col += 9) {
-        if (row != cell) g->cells[row] &= mask;                    // collapse row
-        if (col != cell) g->cells[col] &= mask;                    // collapse column
-        if (boxi[box][i] != cell) g->cells[boxi[box][i]] &= mask;  // collapse box
+        // collapse row
+        if (row != cell) {
+            g->cells[row] &= mask;
+            g->dm[value] |= (__int128_t)1 << row;
+        }
+
+        // collapse column
+        if (col != cell) {
+            g->cells[col] &= mask;
+            g->dm[value] |= (__int128_t)1 << col;
+        }
+
+        // collapse box
+        if (boxi[box][i] != cell) {
+            g->cells[boxi[box][i]] &= mask;
+            g->dm[value] |= (__int128_t)1 << boxi[box][i];
+        }
     }
 }
 
@@ -144,70 +170,39 @@ int naked_single(grid_t *const g) {
     return k;
 }
 
-// TODO: bench and optimize kek
 int hidden_single(grid_t *const g) {
-    int digit_maps[9] = {0}, k = 0, cell;
+    int k = 0, house;
+    __int128_t m;
 
-    // scan rows
-    for (int row = 0; row < 81; row += 9) {
-        // reset dm
-        for (int i = 0; i < 9; i++) digit_maps[i] = 0;
-        cell = row;
-
-        // update dm
-        for (int i = 0; i < 9; i++, cell = row + i)
-            if (!(g->flags[cell] & FLAG_COLLAPSED))
-                for (int v = 0; v < 9; v++)
-                    if (g->cells[cell] & 1 << v) digit_maps[v] |= 1 << i;
-
-        // check dm
-        for (int v = 0; v < 9; v++)
-            if (__builtin_popcount(digit_maps[v]) == 1) {
-                collapse(g, row + ffs(digit_maps[v]) - 1, v);
-                k++;
-            }
-    }
-
-    // scan columns
-    for (int col = 0; col < 9; col += 1) {
-        // reset dm
-        for (int i = 0; i < 9; i++) digit_maps[i] = 0;
-        cell = col;
-
-        // update dm
-        for (int i = 0; i < 9; i++, cell += 9)
-            if (g->flags[cell] & FLAG_COLLAPSED) digit_maps[g->collapsed[cell]] = 0;
-            else
-                for (int v = 0; v < 9; v++)
-                    if (g->cells[cell] & 1 << v) digit_maps[v] |= 1 << i;
-
-        // check dm
-        for (int v = 0; v < 9; v++)
-            if (__builtin_popcount(digit_maps[v]) == 1) {
-                collapse(g, col + 9 * (ffs(digit_maps[v]) - 1), v);
-                k++;
-            }
-    }
-
-    // scan boxes
-    for (int box = 0; box < 9; box += 1) {
-        // reset dm
-        for (int i = 0; i < 9; i++) digit_maps[i] = 0;
-
-        // update dm
-        for (int i = 0; i < 9; i++) {
-            cell = boxi[box][i];
-
-            if (g->flags[cell] & FLAG_COLLAPSED) digit_maps[g->collapsed[cell]] = 0;
-            else
-                for (int v = 0; v < 9; v++)
-                    if (g->cells[cell] & 1 << v) digit_maps[v] |= 1 << i;
-        }
-
-        // check dm
+    for (int i = 0; i < 9; i++) {
         for (int v = 0; v < 9; v++) {
-            if (__builtin_popcount(digit_maps[v]) == 1) {
-                collapse(g, boxi[box][ffs(digit_maps[v]) - 1], v);
+            //  check row
+            house = (~g->dm[v] >> 9 * i) & MASK_HOUSE;
+            if (__builtin_popcount(house) == 1) {
+                // printf("row %d | %d %d\n", i, v + 1, 9 * i + ffs(house) - 1);
+                collapse(g, 9 * i + ffs(house) - 1, v);
+                k++;
+            }
+
+            //  check col
+            m = ~g->dm[v];
+            house = (m >> i & 1) | (m >> (9 + i - 1) & 2) | (m >> (18 + i - 2) & 4) |
+                    (m >> (27 + i - 3) & 8) | (m >> (36 + i - 4) & 16) |
+                    (m >> (45 + i - 5) & 32) | (m >> (54 + i - 6) & 64) |
+                    (m >> (63 + i - 7) & 128) | (m >> (72 + i - 8) & 256);
+            if (__builtin_popcount(house) == 1) {
+                // printf("col %d | %d %d\n", i, v + 1, i + 9 * (ffs(house) - 1));
+                collapse(g, i + 9 * (ffs(house) - 1), v);
+                k++;
+            }
+
+            // check box
+            m = ~g->dm[v] >> (27 * (i / 3) + i % 3 * 3);     // shift box to index 0
+            house = m & 0b111 | (m & 0b111000000000) >> 6 |  // flat box 0 to row 0
+                    (m & 0b111000000000000000000) >> 12;
+            if (__builtin_popcount(house) == 1) {
+                // printf("box %d | %d %d\n", i, v + 1, boxi[i][ffs(house) - 1]);
+                collapse(g, boxi[i][ffs(house) - 1], v);
                 k++;
             }
         }
@@ -222,13 +217,38 @@ void solve(grid_t *const g) {
     do {
         // printf("\n");
         collapsed = 0;
-        
+
         ns = naked_single(g);
         hs = hidden_single(g);
 
         // printf("ns: %d\nhs: %d\n", ns, hs);
         collapsed += ns + hs;
     } while (collapsed != 0);
+}
+
+int check(grid_t *const g) {
+    // digits store per house
+    int rows[9] = {0};
+    int cols[9] = {0};
+    int boxes[9] = {0};
+
+    for (int cell = 0; cell < 81; cell++)
+        if (g->flags[cell] & FLAG_COLLAPSED) {
+            int row = hcord[cell][0], col = hcord[cell][1], box = hcord[cell][2];
+            int value = 1 << g->collapsed[cell];
+
+            //  cehck
+            if (rows[row] & value) return cell;
+            if (cols[col] & value) return cell;
+            if (boxes[box] & value) return cell;
+
+            // update
+            rows[row] |= value;
+            cols[col] |= value;
+            boxes[box] |= value;
+        }
+
+    return 0;
 }
 
 #endif  // SLIB_IMPLEMENTATION
